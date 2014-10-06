@@ -1,23 +1,40 @@
 FORKED FOR VISA
 ================
-
 jenkins Cookbook
 ================
-[![Build Status](https://secure.travis-ci.org/opscode-cookbooks/jenkins.png?branch=master)](http://travis-ci.org/opscode-cookbooks/jenkins)
+[![Build Status](http://img.shields.io/travis/opscode-cookbooks/jenkins.svg)][travis]
+
+
+[travis]: http://travis-ci.org/opscode-cookbooks/jenkins
 
 Installs and configures Jenkins CI master & node slaves. Resource providers to support automation via jenkins-cli, including job create/update.
 
+This project is managed by the CHEF Release Engineering team. For more information on the Release Engineering team's contribution, triage, and release process, please consult the [CHEF Release Engineering OSS Management Guide](https://docs.google.com/a/opscode.com/document/d/1oJB0vZb_3bl7_ZU2YMDBkMFdL-EWplW1BJv_FXTUOzg/edit).
 
 Requirements
 ------------
 - Chef 11 or higher
 - **Ruby 1.9.3 or higher**
 
+Public Service Announcment
+----------------------------
+If you are using jenkins with authentication:  until [JENKINS-22346](https://issues.jenkins-ci.org/browse/JENKINS-22346) is fixed, pin to version 1.555 of jenkins and use the `war` installation method:
+
+````
+node.default['jenkins']['master']['install_method'] = 'war'
+node.default['jenkins']['master']['version'] = '1.555'
+node.default['jenkins']['master']['source'] = "#{node['jenkins']['master']['mirror']}/war/#{node['jenkins']['master']['version']}/jenkins.war"
+````
+
+JENKINS-22346 affects the `jenkins-cli` command, whose use by this cookbook is described in the Caveats section under Authentication.
 
 Attributes
 ----------
 In order to keep the README managable and in sync with the attributes, this cookbook documents attributes inline. The usage instructions and default values for attributes can be found in the individual attribute files.
 
+Examples
+---------
+Documentation and examples are provided inline using YARD.  The tests and fixture cookbooks in `tests` and `tests/fixtures` are intended to be a further source of examples.
 
 Recipes
 -------
@@ -204,7 +221,7 @@ This resource manages Jenkins plugins, supporting the following actions:
 
     :install, :uninstall, :enable, :disable
 
-This uses the Jenkins CLI to install plugins. By default, it does a cold deploy, meaning the plugin is installed while Jenkins is still running. **This LWRP does not install plugin dependencies - you must specify all plugin dependencies or Jenkins may not startup correctly!**
+This uses the Jenkins CLI to install plugins. By default, it does a cold deploy, meaning the plugin is installed while Jenkins is still running. Some plugins may require you restart the Jenkins instance for their changed to take affect. **This resource does not install plugin dependencies - you must specify all plugin dependencies or Jenkins may not startup correctly!**
 
 The `:install` action idempotely installs a Jenkins plugin on the current node. The name attribute corresponds to the name of the plugin on the Jenkins Update Center. You can also specify a particular version of the plugin to install. Finally, you can specify a full source URL or local path (on the node) to a plugin.
 
@@ -220,6 +237,22 @@ end
 # Install a plugin from a given hpi (or jpi)
 jenkins_plugin 'greenballs' do
   source 'http://updates.jenkins-ci.org/download/plugins/greenballs/1.10/greenballs.hpi'
+end
+```
+
+Depending on the plugin, you may need to restart the Jenkins instance for the plugin to take affect:
+
+```ruby
+jenkins_plugin 'a_complicated_plugin' do
+  notifies :restart, 'service[jenkins]', :immediately
+end
+```
+
+For advanced users, this resource exposes an `options` attribute that will be passed to the installation command. For more information on the possible values of these options, pleaes consult the documentation for your Jenkins installation.
+
+```ruby
+jenkins_plugin 'a_really_complicated_plugin' do
+  options '-deploy -cold'
 end
 ```
 
@@ -261,8 +294,8 @@ The following slave launch methods are supported:
 
 The `jenkins_slave` resource is actually the base resource for several resources that map directly back to a launch method:
 
-* `jenkins_jnlp_slave`
-* `jenkins_ssh_slave`
+* `jenkins_jnlp_slave` - As JNLP Slave connections are slave initiated, this resource should be part of a __slave__'s run list.
+* `jenkins_ssh_slave` - As SSH Slave connections are master initiated, this resource should be part of a __master__'s run list.
 
 The `:create` action idempotely creates a Jenkins slave on the master. The name attribute corresponds to the name of the slave (which is also used to uniquely identify the slave).
 
@@ -281,8 +314,9 @@ jenkins_ssh_slave 'executor' do
   labels      ['executor', 'freebsd', 'jail']
 
   # SSH specific attributes
-  host     'localhost'
-  username 'jenkins'
+  host        '172.11.12.53' # or 'slave.example.org'
+  user        'jenkins'
+  credentials 'wcoyote'
 end
 
 # A slave's executors, usage mode and availability can also be configured
@@ -415,22 +449,22 @@ end
 Caveats
 -------
 ### Authentication
-If you use or plan to use authentication for your Jenkins cluster (which we highly recommend), you will need to set a special node attribute:
+If you use or plan to use authentication for your Jenkins cluster (which we highly recommend), you will need to set a special value in the `run_context`:
 
 ```ruby
-node['jenkins']['executor']['private_key']
+node.run_state[:jenkins_private_key]
 ```
 
-The underlying executor class (which all LWRPs use) intelligently adds authentication information to the Jenkins CLI commands if this attribute is set. The method used to generate and populate this key-pair is left to the user:
+The underlying executor class (which all LWRPs use) intelligently adds authentication information to the Jenkins CLI commands if this value is set. The method used to generate and populate this key-pair is left to the user:
 
 ```ruby
 # Using search
 master = search(:node, 'fqdn:master.ci.example.com').first
-node.set['jenkins']['executor']['private_key'] = master['jenkins']['private_key']
+node.run_state[:jenkins_private_key] = master['jenkins']['private_key']
 
 # Using encrypted data bags and chef-sugar
 private_key = encrypted_data_bag_item('jenkins', 'keys')['private_key']
-node.set['jenkins']['executor']['private_key'] = private_key
+node.run_state[:jenkins_private_key] = private_key
 ```
 
 The associated public key must be set on a Jenkins user. You can use the `jenkins_user` resource to create this pairing. Here's an example that uses OpenSSL to create a keypair and assigns it appropiately:
@@ -449,7 +483,7 @@ end
 
 # Set the private key on the Jenkins executor
 ruby_block 'set private key' do
-  block { node.set['jenkins']['executor']['private_key'] = private_key }
+  block { node.run_state[:jenkins_private_key] = private_key }
 end
 ```
 

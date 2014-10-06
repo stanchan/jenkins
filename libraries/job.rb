@@ -19,50 +19,29 @@
 # limitations under the License.
 #
 
+require_relative '_helper'
+require_relative '_params_validate'
+
 class Chef
-  class Resource::JenkinsJob < Resource
+  class Resource::JenkinsJob < Resource::LWRPBase
+    # Chef attributes
     identity_attr :name
+    provides :jenkins_job
+
+    # Set the resource name
+    self.resource_name = :jenkins_job
+
+    # Actions
+    actions :create, :delete, :disable, :enable
+    default_action :create
+
+    # Attributes
+    attribute :name,
+      kind_of: String
+    attribute :config,
+      kind_of: String
 
     attr_writer :enabled, :exists
-
-    def initialize(name, run_context = nil)
-      super
-
-      # Set the resource name and provider
-      @resource_name = :jenkins_job
-      @provider = Provider::JenkinsJob
-
-      # Set default actions and allowed actions
-      @action = :create
-      @allowed_actions.push(:create, :delete, :disable, :enable)
-
-      # Set the name attribute and default attributes
-      @name = name
-
-      # State attributes that are set by the provider
-      @exists  = false
-      @enabled = false
-    end
-
-    #
-    # The name of the job.
-    #
-    # @param [String] arg
-    # @return [String]
-    #
-    def name(arg = nil)
-      set_or_return(:name, arg, kind_of: String)
-    end
-
-    #
-    # The path to the configuration file on disk.
-    #
-    # @param [String] arg
-    # @return [String] arg
-    #
-    def config(arg = nil)
-      set_or_return(:config, arg, kind_of: String)
-    end
 
     #
     # Determine if the job exists on the master. This value is set by the
@@ -87,7 +66,7 @@ class Chef
 end
 
 class Chef
-  class Provider::JenkinsJob < Provider
+  class Provider::JenkinsJob < Provider::LWRPBase
     class JobDoesNotExist < StandardError
       def initialize(job, action)
         super <<-EOH
@@ -98,13 +77,10 @@ EOH
     end
 
     require 'rexml/document'
-
     include Jenkins::Helper
 
     def load_current_resource
-      Chef::Log.debug("Loading current resource #{new_resource}")
-
-      @current_resource = Resource::JenkinsJob.new(new_resource.name)
+      @current_resource ||= Resource::JenkinsJob.new(new_resource.name)
       @current_resource.name(new_resource.name)
       @current_resource.config(new_resource.config)
 
@@ -115,6 +91,8 @@ EOH
         @current_resource.exists  = false
         @current_resource.enabled = false
       end
+
+      @current_resource
     end
 
     #
@@ -137,14 +115,14 @@ EOH
     # Requirements:
     #   - `config` parameter
     #
-    def action_create
+    action(:create) do
       validate_config!
 
       if current_resource.exists?
         Chef::Log.debug("#{new_resource} exists - skipping")
       else
         converge_by("Create #{new_resource}") do
-          executor.execute!('create-job', new_resource.name, '<', new_resource.config)
+          executor.execute!('create-job', escape(new_resource.name), '<', escape(new_resource.config))
         end
       end
 
@@ -152,7 +130,7 @@ EOH
         Chef::Log.debug("#{new_resource} config up to date - skipping")
       else
         converge_by("Update #{new_resource} config") do
-          executor.execute!('update-job', new_resource.name, '<', new_resource.config)
+          executor.execute!('update-job', escape(new_resource.name), '<', escape(new_resource.config))
         end
       end
     end
@@ -162,10 +140,10 @@ EOH
     # the job does not exist, no action will be taken. If the job does exist,
     # it will be deleted using the Jenkins CLI.
     #
-    def action_delete
+    action(:delete) do
       if current_resource.exists?
         converge_by("Delete #{new_resource}") do
-          executor.execute!('delete-job', new_resource.name)
+          executor.execute!('delete-job', escape(new_resource.name))
         end
       else
         Chef::Log.debug("#{new_resource} does not exist - skipping")
@@ -180,14 +158,14 @@ EOH
     # @raise [JobDoesNotExist]
     #   if the job does not exist
     #
-    def action_disable
+    action(:disable) do
       unless current_resource.exists?
         fail JobDoesNotExist.new(new_resource.name, :disable)
       end
 
       if current_resource.enabled?
         converge_by("Disable #{new_resource}") do
-          executor.execute!('disable-job', new_resource.name)
+          executor.execute!('disable-job', escape(new_resource.name))
         end
       else
         Chef::Log.debug("#{new_resource} disabled - skipping")
@@ -202,7 +180,7 @@ EOH
     # @raise [JobDoesNotExist]
     #   if the job does not exist
     #
-    def action_enable
+    action(:enable) do
       unless current_resource.exists?
         fail JobDoesNotExist.new(new_resource.name, :enable)
       end
@@ -211,7 +189,7 @@ EOH
         Chef::Log.debug("#{new_resource} enabled - skipping")
       else
         converge_by("Enable #{new_resource}") do
-          executor.execute!('enable-job', new_resource.name)
+          executor.execute!('enable-job', escape(new_resource.name))
         end
       end
     end
@@ -230,7 +208,7 @@ EOH
 
       Chef::Log.debug "Load #{new_resource} job information"
 
-      response = executor.execute('get-job', new_resource.name)
+      response = executor.execute('get-job', escape(new_resource.name))
       return nil if response.nil? || response =~ /No such job/
 
       Chef::Log.debug "Parse #{new_resource} as XML"
@@ -276,7 +254,7 @@ EOH
 
       if new_resource.config.nil?
         fail("#{new_resource} must specify a configuration file!")
-      elsif !::File.exists?(new_resource.config)
+      elsif !::File.exist?(new_resource.config)
         fail("#{new_resource} config `#{new_resource.config}` does not exist!")
       else
         begin
@@ -288,3 +266,8 @@ EOH
     end
   end
 end
+
+Chef::Platform.set(
+  resource: :jenkins_job,
+  provider: Chef::Provider::JenkinsJob
+)

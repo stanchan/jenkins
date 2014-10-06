@@ -19,46 +19,34 @@
 # limitations under the License.
 #
 
-require 'base64'
-require 'openssl'
+require_relative '_params_validate'
 require_relative 'slave'
+require_relative 'credentials'
 
 class Chef
   class Resource::JenkinsSSHSlave < Resource::JenkinsSlave
+    # Chef attributes
     provides :jenkins_ssh_slave
 
-    def initialize(name, run_context = nil)
-      super
+    # Set the resource name
+    self.resource_name = :jenkins_ssh_slave
 
-      # Set the resource name and provider
-      @resource_name = :jenkins_ssh_slave
-      @provider = Provider::JenkinsSSHSlave
+    # Actions
+    actions :create, :delete, :connect, :disconnect, :online, :offline
+    default_action :create
 
-      # Set the name attribute and default attributes
-      @port           = 22
-      @command_prefix = nil
-      @command_suffix = nil
-    end
-
-    #
-    # The hostname of the slave. This can also be an IP address.
-    #
-    # @param [String] arg
-    # @return [String]
-    #
-    def host(arg = nil)
-      set_or_return(:host, arg, kind_of: String)
-    end
-
-    #
-    # The port on the slave on which the `sshd` service is listening.
-    #
-    # @param [Integer] arg
-    # @return [Integer]
-    #
-    def port(arg = nil)
-      set_or_return(:port, arg, kind_of: Integer)
-    end
+    # Attributes
+    attribute :host,
+      kind_of: String
+    attribute :port,
+      kind_of: Integer,
+      default: 22
+    attribute :credentials,
+      kind_of: [Resource::JenkinsCredentials, String]
+    attribute :command_prefix,
+      kind_of: String
+    attribute :command_suffix,
+      kind_of: String
 
     #
     # The credentials to SSH into the slave with. Credentials can be any
@@ -68,36 +56,14 @@ class Chef
     # * UUID of a Jenkins credentials instance.
     # * A `Chef::Resource::JenkinsCredentials` instnace.
     #
-    # @param [String] arg
     # @return [String]
     #
-    def credentials(arg = nil)
-      # Extract the username from a Chef::Resource::JenkinsCredentials
-      # instance
-      if arg.kind_of? Chef::Resource::JenkinsCredentials
-        arg = arg.send(:username)
+    def parsed_credentials
+      if credentials.is_a?(Resource::JenkinsCredentials)
+        credentials.send(:username)
+      else
+        credentials.to_s
       end
-      set_or_return(:credentials, arg, kind_of: String)
-    end
-
-    #
-    # The SSH command prefix.
-    #
-    # @param [String] arg
-    # @return [String]
-    #
-    def command_prefix(arg = nil)
-      set_or_return(:command_prefix, arg, kind_of: String)
-    end
-
-    #
-    # The SSH command suffix.
-    #
-    # @param [String] arg
-    # @return [String]
-    #
-    def command_suffix(arg = nil)
-      set_or_return(:command_suffix, arg, kind_of: String)
     end
   end
 end
@@ -115,20 +81,8 @@ class Chef
         @current_resource.credentials(current_slave[:credentials])
         @current_resource.jvm_options(current_slave[:jvm_options])
       end
-    end
 
-    #
-    # @see Chef::Resource::JenkinsSlave#action_create
-    #
-    def action_create
-      parent_remote_fs_dir_resource
-      group_resource.run_action(:create)
-      user_resource.run_action(:create)
-      remote_fs_dir_resource.run_action(:create)
-      ssh_dir_resource.run_action(:create)
-      authorized_keys_file_resource.run_action(:create)
-
-      super
+      @current_resource
     end
 
     protected
@@ -162,11 +116,11 @@ class Chef
         host: 'slave.launcher.host',
         port: 'slave.launcher.port',
         jvm_options: 'slave.launcher.jvmOptions',
-        command_prefix: 'jenkins.launcher.prefixStartSlaveCmd',
-        command_suffix: 'jenkins.launcher.suffixStartSlaveCmd',
+        command_prefix: 'slave.launcher.prefixStartSlaveCmd',
+        command_suffix: 'slave.launcher.suffixStartSlaveCmd',
       }
 
-      if new_resource.credentials.match(UUID_REGEX)
+      if new_resource.parsed_credentials.match(UUID_REGEX)
         map[:credentials] = 'slave.launcher.credentialsId'
       else
         map[:credentials] = 'hudson.plugins.sshslaves.SSHLauncher.lookupSystemCredentials(slave.launcher.credentialsId).username'
@@ -178,87 +132,26 @@ class Chef
 
     #
     # A Groovy snippet that will set the requested local Groovy variable
-    # to an instance of the credentials represented by `new_resource.credentials`.
+    # to an instance of the credentials represented by
+    # `new_resource.parsed_credentials`.
     #
     # @param [String] groovy_variable_name
     # @return [String]
     #
     def credential_lookup_groovy(groovy_variable_name = 'credentials_id')
-      if new_resource.credentials.match(UUID_REGEX)
-        "#{groovy_variable_name} = #{convert_to_groovy(new_resource.credentials)}"
+      if new_resource.parsed_credentials.match(UUID_REGEX)
+        "#{groovy_variable_name} = #{convert_to_groovy(new_resource.parsed_credentials)}"
       else
         <<-EOH.gsub(/ ^{10}/, '')
-          #{credentials_for_username_groovy(new_resource.credentials, 'user_credentials')}
+          #{credentials_for_username_groovy(new_resource.parsed_credentials, 'user_credentials')}
           #{groovy_variable_name} = user_credentials.id
         EOH
       end
     end
-
-    #
-    # Looks up the private key from the slave's credentials.
-    #
-    # @return [String]
-    #
-    def private_key
-      return @private_key if @private_key
-      json = executor.groovy! <<-EOH.gsub(/ ^{8}/, '')
-        #{credential_lookup_groovy('credentials_id')}
-        credentials =
-          hudson.plugins.sshslaves.SSHLauncher.lookupSystemCredentials(credentials_id)
-
-        output = [
-          private_key:credentials.privateKey
-        ]
-
-        builder = new groovy.json.JsonBuilder(output)
-        println(builder)
-      EOH
-      output = JSON.parse(json, symbolize_names: true)
-      @private_key = output[:private_key]
-    end
-
-    #
-    # Extracts a public key from the slave's private key encoded in SSH
-    # Public Key format.
-    #
-    # @return [String]
-    #
-    def ssh_pub_key
-      return @ssh_pub_key if @ssh_pub_key
-      # Load net-ssh as it adds `#ssh_type` and `#to_blob` methods to
-      # `OpenSSL::PKey::RSA`.
-      #
-      # More info at: http://stackoverflow.com/a/10375654/80030
-      require 'net/ssh'
-      # extract the public key from the private key
-      public_key = OpenSSL::PKey::RSA.new(private_key).public_key
-      ssh_pub_key_parts =  [public_key.ssh_type]
-      ssh_pub_key_parts << Base64.encode64(public_key.to_blob).gsub("\n", '')
-      @ssh_pub_key = ssh_pub_key_parts.join("\s")
-    end
-
-    # Embedded Resources
-
-    def ssh_dir_resource
-      return @ssh_dir_resource if @ssh_dir_resource
-      dot_ssh_path = ::File.join(new_resource.remote_fs, '.ssh')
-      @ssh_dir_resource = Chef::Resource::Directory.new(dot_ssh_path, run_context)
-      @ssh_dir_resource.owner(new_resource.user)
-      @ssh_dir_resource.group(new_resource.group)
-      @ssh_dir_resource.recursive(true)
-      @ssh_dir_resource.mode('0700')
-      @ssh_dir_resource
-    end
-
-    def authorized_keys_file_resource
-      return @authorized_keys_file_resource if @authorized_keys_file_resource
-      auhtorized_key_path = ::File.join(ssh_dir_resource.path, 'authorized_keys')
-      @authorized_keys_file_resource = Chef::Resource::File.new(auhtorized_key_path, run_context)
-      @authorized_keys_file_resource.owner(new_resource.user)
-      @authorized_keys_file_resource.group(new_resource.group)
-      @authorized_keys_file_resource.mode('0600')
-      @authorized_keys_file_resource.content(ssh_pub_key)
-      @authorized_keys_file_resource
-    end
   end
 end
+
+Chef::Platform.set(
+  resource: :jenkins_ssh_slave,
+  provider: Chef::Provider::JenkinsSSHSlave
+)

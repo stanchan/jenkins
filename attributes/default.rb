@@ -52,5 +52,4 @@ default['jenkins'].tap do |jenkins|
                       'java'
                     end
 end
-
 default['jenkins']['internal_repo']['enabled'] = false

@@ -28,7 +28,7 @@ when 'debian'
   apt_repository 'jenkins' do
     uri          'http://pkg.jenkins-ci.org/debian'
     distribution 'binary/'
-    key          'http://pkg.jenkins-ci.org/debian/jenkins-ci.org.key'
+    key          'https://jenkins-ci.org/debian/jenkins-ci.org.key'
   end
 
   package 'jenkins' do
@@ -45,7 +45,7 @@ when 'rhel'
 
   yum_repository 'jenkins-ci' do
     baseurl 'http://pkg.jenkins-ci.org/redhat'
-    gpgkey  'http://pkg.jenkins-ci.org/redhat/jenkins-ci.org.key'
+    gpgkey  'https://jenkins-ci.org/redhat/jenkins-ci.org.key'
     not_if { node['jenkins']['internal_repo']['enabled'] }
   end
 
@@ -53,9 +53,14 @@ when 'rhel'
     action :delete
     only_if { node['jenkins']['internal_repo']['enabled'] }
   end
-  
+
   package 'jenkins' do
     version node['jenkins']['master']['version']
+  end
+
+  file "/etc/yum.repos.d/jenkins.repo" do
+    action :delete
+    only_if { node['jenkins']['internal_repo']['enabled'] }
   end
 
   template '/etc/sysconfig/jenkins' do
@@ -63,8 +68,27 @@ when 'rhel'
     mode     00644
     notifies :restart, 'service[jenkins]', :immediately
   end
-else
-  fail "`#{node['platform_family']}' is not supported!"
+end
+
+template "#{node["jenkins"]["master"]["home"]}/hudson.model.UpdateCenter.xml" do
+  source "hudson.model.UpdateCenter.xml.erb"
+  owner node["jenkins"]["master"]["user"]
+  group node["jenkins"]["master"]["group"]
+  mode 00644
+  variables(update_url: "#{node["jenkins"]["master"]["mirror"]}/updates/update-center.json")
+end
+
+directory "#{node["jenkins"]["master"]["home"]}/updates" do
+  owner node["jenkins"]["master"]["user"]
+  group node["jenkins"]["master"]["group"]
+  mode 00755
+end
+
+execute "update jenkins update center" do
+  command "wget #{node["jenkins"]["master"]["mirror"]}/updates/update-center.json -qO- | sed '1d;$d'  > #{node["jenkins"]["master"]["home"]}/updates/default.json"
+  user node["jenkins"]["master"]["user"]
+  group node["jenkins"]["master"]["group"]
+  creates "#{node["jenkins"]["master"]["home"]}/updates/default.json"
 end
 
 service 'jenkins' do
